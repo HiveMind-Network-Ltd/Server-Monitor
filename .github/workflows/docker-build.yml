@@ -45,3 +45,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+      - name: Trigger deploy on grid server
+        run: |
+          curl -s -o /dev/null -w "%{http_code}" \
+            -X POST https://server-monitor.grid.hivemindnetwork.com/deploy/server-monitor \
+            -H "X-Hive-Secret: ${{ secrets.DEPLOY_WEBHOOK_SECRET_SERVER_MONITOR }}"
