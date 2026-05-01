@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -34,6 +34,8 @@
                     <span class="user-info">👤 <span id="username-display"></span></span>
                     <button id="add-server-btn" class="btn btn-secondary">+ Add Server</button>
                     <button id="email-settings-btn" class="btn btn-secondary">📧 Email Alerts</button>
+                    <button id="rightsizing-btn" class="btn btn-secondary">📊 Right-Sizing</button>
+                    <button id="theme-toggle-btn" class="btn btn-secondary" title="Toggle light/dark mode">🌙</button>
                     <button id="refresh-btn" class="btn btn-secondary">🔄 Refresh</button>
                     <button id="logout-btn" class="btn btn-secondary">Logout</button>
                 </div>
@@ -81,6 +83,17 @@
             <div id="no-containers" class="no-servers hidden">
                 <p>No Docker containers found. Make sure Docker socket is mounted.</p>
             </div>
+
+            <!-- Right-Sizing Panel -->
+            <div id="rightsizing-panel" class="rightsizing-panel hidden">
+                <div class="rightsizing-header">
+                    <h2>📊 Right-Sizing Advisor</h2>
+                    <p class="rightsizing-subtitle">Based on 7-day p95 utilisation. Recommendations appear after 5 days of data collection.</p>
+                </div>
+                <div id="rightsizing-content">
+                    <div class="rightsizing-loading">Loading recommendations…</div>
+                </div>
+            </div>
         </main>
     </div>
 
@@ -118,6 +131,28 @@
                     <button type="submit" class="btn btn-primary">Add Server</button>
                 </div>
             </form>
+        </div>
+    </div>
+
+    <!-- Right-Sizing Detail Modal -->
+    <div id="rightsizing-modal" class="modal hidden">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h2 id="rs-modal-title">Server History</h2>
+                <button class="close-btn" onclick="closeRightSizingModal()">×</button>
+            </div>
+            <div class="rs-tabs">
+                <button class="rs-tab active" data-metric="cpu" onclick="switchSparklineTab(this, 'cpu')">CPU</button>
+                <button class="rs-tab" data-metric="mem" onclick="switchSparklineTab(this, 'mem')">Memory</button>
+                <button class="rs-tab" data-metric="disk" onclick="switchSparklineTab(this, 'disk')">Disk</button>
+            </div>
+            <div class="rs-chart-area">
+                <canvas id="rs-sparkline" width="700" height="180"></canvas>
+                <div id="rs-chart-empty" class="rs-empty hidden">No data available for this period</div>
+            </div>
+            <div class="rs-summary" id="rs-summary">
+                <!-- Summary injected by JS -->
+            </div>
         </div>
     </div>
 
