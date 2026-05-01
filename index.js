@@ -8,6 +8,8 @@ const { getServers, addServer, updateServer, deleteServer } = require('./config/
 const { monitorServer } = require('./services/awsMonitor');
 const { startBackgroundMonitoring, getLatestMetrics } = require('./services/backgroundMonitor');
 const { isEmailConfigured, sendTestEmail } = require('./services/emailService');
+const metricsStore = require('./services/metricsStore');
+const { getRecommendations } = require('./services/advisorEngine');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -26,6 +28,14 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // Initialize admin user on startup
 initializeAdmin().catch(console.error);
+
+// Initialise SQLite metrics store
+try {
+  metricsStore.init();
+  console.log('Metrics store initialised');
+} catch (err) {
+  console.error('Failed to initialise metrics store:', err);
+}
 
 // Start background monitoring
 startBackgroundMonitoring();
@@ -395,6 +405,41 @@ app.get('/api/status/public', (req, res) => {
 // Serve public status page
 app.get('/status', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'status.html'));
+});
+
+// ============ Right-Sizing Routes (authenticated) ============
+
+// Get metric history for a server
+// Query params: ?days=7 (default), ?resolution=hourly (default) | raw
+app.get('/api/history/:serverId', authMiddleware, (req, res) => {
+  try {
+    const serverId = req.params.serverId;
+    const days = Math.min(parseInt(req.query.days || '7', 10), 90);
+    const resolution = req.query.resolution === 'raw' ? 'raw' : 'hourly';
+
+    let rows;
+    if (resolution === 'raw') {
+      rows = metricsStore.readRaw(serverId, days);
+    } else {
+      rows = metricsStore.readHourly(serverId, days);
+    }
+
+    res.json({ serverId, resolution, days, rows });
+  } catch (error) {
+    console.error('Error fetching history:', error);
+    res.status(500).json({ error: 'Failed to fetch history' });
+  }
+});
+
+// Get right-sizing recommendations for all servers
+app.get('/api/recommendations', authMiddleware, (req, res) => {
+  try {
+    const recommendations = getRecommendations();
+    res.json({ recommendations });
+  } catch (error) {
+    console.error('Error computing recommendations:', error);
+    res.status(500).json({ error: 'Failed to compute recommendations' });
+  }
 });
 
 // ============ Health Check ============

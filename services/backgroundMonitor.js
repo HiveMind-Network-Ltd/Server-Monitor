@@ -4,6 +4,7 @@ const { getServers } = require('../config/servers');
 const { monitorServer } = require('./awsMonitor');
 const { monitorDockerContainers } = require('./dockerMonitor');
 const { checkAndSendAlerts } = require('./emailService');
+const metricsStore = require('./metricsStore');
 
 const CACHE_FILE = path.join(__dirname, '../data/metrics-cache.json');
 const MONITOR_INTERVAL = parseInt(process.env.MONITOR_INTERVAL || '30000'); // 30 seconds
@@ -70,7 +71,24 @@ async function runMonitoring() {
     
     // Save to disk
     saveCache();
-    
+
+    // Write metrics to SQLite time-series store (for right-sizing advisor)
+    try {
+      for (const s of serverResults) {
+        if (s.metrics && s.status === 'running') {
+          metricsStore.write(s.id, {
+            cpu_pct:  s.metrics.cpu  != null ? s.metrics.cpu  : null,
+            mem_pct:  s.metrics.ram  != null ? s.metrics.ram  : null,
+            disk_pct: s.metrics.disk != null ? s.metrics.disk : null
+          });
+        }
+      }
+      // Run prune guard (no-ops if already pruned today)
+      metricsStore.prune();
+    } catch (storeErr) {
+      console.error('[backgroundMonitor] metrics store write error:', storeErr.message);
+    }
+
     // Check for alerts and send email notifications
     await checkAndSendAlerts(serverResults, containerResults);
     
