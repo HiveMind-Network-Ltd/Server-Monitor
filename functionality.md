@@ -1,12 +1,53 @@
 # Server Monitor - Functionality Documentation
 
 ## Overview
-Server Monitor is a comprehensive AWS EC2 monitoring application with authentication that tracks CPU, RAM, and disk usage across multiple servers with real-time alerts, background monitoring, and a public status page.
+Server Monitor is a comprehensive AWS EC2 monitoring application with authentication that tracks CPU, RAM, and disk usage across multiple servers with real-time alerts, background monitoring, and a public status page. It also exposes an authenticated webhook endpoint that lets CI pipelines redeploy individual compose services on the host stack.
 
 ## Version
-Current version: 2.2.0
+Current version: 3.1.0
 
 ## Features and Functions
+
+### 0. Auto-Deploy Webhook (NEW in v3.1.0)
+
+#### Purpose
+Lets GitHub Actions (or any trusted caller) trigger a `docker compose pull + up -d` for a single service on the host stack, without SSH access. Replaces the previously silently-404ing "trigger deploy" CI step.
+
+#### Endpoint
+- **POST /deploy/:service** — `service` must be a compose service name defined in the host stack's `docker-compose.yml`.
+- Requires header **`X-Hive-Secret: <per-service-shared-secret>`**.
+- Returns **202 Accepted** on success with `{ ok, service, sidecar, logFile }`. The actual redeploy is performed asynchronously by a one-shot sidecar container.
+
+#### Security
+- Each service is allowlisted explicitly via an env var: `DEPLOY_WEBHOOK_SECRET_<NAME>` (e.g. `DEPLOY_WEBHOOK_SECRET_MARKETSCRAPER_API`). No secret means 404 — the webhook can't redeploy services it hasn't been configured for.
+- Secret comparison uses `crypto.timingSafeEqual`.
+- Service name is validated against a strict regex (`[a-zA-Z][a-zA-Z0-9_-]{0,62}`) so it cannot leak into the shell.
+- All attempts (accept / reject / error / complete) are written as JSON lines to `data/deploys/deploy.log`.
+
+#### Sidecar Deploy Pattern
+The redeploy runs inside a one-shot `docker:cli` container (`docker run --rm -d`) that mounts `/var/run/docker.sock` and `/srv/stack:/srv/stack:ro`. Using a sidecar rather than an in-process spawn means server-monitor can auto-deploy *itself* without being killed mid-response.
+
+#### Required Host Wiring
+- Host `docker-compose.yml` must bind-mount the stack root into server-monitor read-only:
+  `- /srv/stack:/srv/stack:ro`
+- Host `docker.sock` must be mounted (already standard for this app): `- /var/run/docker.sock:/var/run/docker.sock`
+- Server-monitor's `.env` must contain one `DEPLOY_WEBHOOK_SECRET_<NAME>` entry per allowlisted service.
+
+#### CI Workflow Pattern
+```yaml
+- name: Trigger deploy on grid server
+  run: |
+    curl -sS -X POST \
+      -H "X-Hive-Secret: ${{ secrets.DEPLOY_WEBHOOK_SECRET_<NAME> }}" \
+      https://server-monitor.grid.hivemindnetwork.com/deploy/<compose-service-name>
+```
+
+#### Environment Variables
+- `DEPLOY_COMPOSE_FILE` — path to host compose file (default `/srv/stack/docker-compose.yml`)
+- `DEPLOY_PROJECT_DIR` — compose project root (default `/srv/stack`)
+- `DEPLOY_LOG_DIR` — audit log location (default `<app>/data/deploys`)
+- `DEPLOY_SIDECAR_IMAGE` — docker image used to run compose (default `docker:cli`)
+- `DEPLOY_WEBHOOK_SECRET_<NAME>` — per-service shared secret (required for each allowlisted service)
 
 ### 1. Background Monitoring System (NEW in v2.1.0)
 
@@ -251,7 +292,7 @@ All `/api/*` endpoints except `/api/auth/login` and `/api/status/public` require
 ### 12. Docker Support
 
 #### Dockerfile Features
-- **Base Image**: Node.js 18 Alpine (lightweight)
+- **Base Image**: Node.js 20 Alpine (lightweight) — bumped from 18 in v3.1.0 because AWS SDK v3 dropped Node 18 support
 - **Production Build**: Uses `npm ci` for reproducible builds
 - **Security**: Runs as non-root user
 - **Port**: Exposes port 3000
@@ -267,7 +308,7 @@ All `/api/*` endpoints except `/api/auth/login` and `/api/status/public` require
 #### GitHub Actions Workflow
 - **Trigger**: Automatic build on push to main branch
 - **Registry**: Publishes to GitHub Container Registry (ghcr.io)
-- **Image**: ghcr.io/hivemindnet/Server-Monitor:latest
+- **Image**: ghcr.io/hivemind-network-ltd/server-monitor:latest (moved from `hivemindnet` GHCR org during org rename)
 - **Authentication**: Uses GitHub token for GHCR authentication
 - **Tagging**: Creates 'latest' tag and SHA-based tags
 
