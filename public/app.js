@@ -659,6 +659,7 @@ async function toggleRightSizingPanel() {
     if (!panel) return;
     if (panel.classList.contains('hidden')) {
         panel.classList.remove('hidden');
+        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
         await loadRecommendations();
     } else {
         panel.classList.add('hidden');
