@@ -24,12 +24,31 @@
 //                          DOCKER_CONFIG is set so the docker CLI picks it
 //                          up. This is how the sidecar authenticates to
 //                          ghcr.io when pulling private images.
-//   DEPLOY_WEBHOOK_SECRET_<SERVICE_NAME>
-//                          per-service shared secret. Service name is
-//                          uppercased with hyphens replaced by underscores.
-//                          Presence of this env var also allowlists the
-//                          service for auto-deploy; anything without a
-//                          configured secret is rejected with 404.
+//
+// Authentication has two modes (either or both can be configured; a request
+// is accepted if EITHER matches):
+//
+//   1. Shared secret (recommended for a growing fleet):
+//        DEPLOY_WEBHOOK_SECRET      one secret, shared by every allowlisted
+//                                   service
+//        DEPLOY_WEBHOOK_SERVICES    required allowlist. Either a
+//                                   comma-separated list of compose service
+//                                   names (e.g. "server-monitor,app,clients")
+//                                   or the wildcard "*" to allow any valid
+//                                   service name. If unset or empty, the
+//                                   shared secret is disabled (only
+//                                   per-service secrets are honoured).
+//
+//   2. Per-service secret (backward compatible, also acts as its own
+//      allowlist):
+//        DEPLOY_WEBHOOK_SECRET_<SERVICE_NAME>
+//                                   per-service secret. Service name is
+//                                   uppercased with hyphens replaced by
+//                                   underscores. Presence of this env var
+//                                   also allowlists the service.
+//
+//   Anything that isn't allowlisted via either mechanism is rejected with 404.
+//   Invalid secret / missing header are rejected with 401.
 //
 // Audit log: JSON lines appended to <DEPLOY_LOG_DIR>/deploy.log.
 // Per-deploy sidecar stdout/stderr: <DEPLOY_LOG_DIR>/<service>-<ts>.log.
@@ -46,6 +65,8 @@ const SIDECAR_IMAGE  = process.env.DEPLOY_SIDECAR_IMAGE  || 'docker:cli';
 const DOCKER_CONFIG  = process.env.DEPLOY_DOCKER_CONFIG  || '/root/.docker';
 
 const SECRET_PREFIX = 'DEPLOY_WEBHOOK_SECRET_';
+const SHARED_SECRET_ENV = 'DEPLOY_WEBHOOK_SECRET';
+const SHARED_ALLOWLIST_ENV = 'DEPLOY_WEBHOOK_SERVICES';
 
 // Service name whitelist pattern: must start with a letter, then letters,
 // digits, hyphens, or underscores. Keeps shell injection impossible even if
@@ -57,16 +78,71 @@ function validServiceName(s) {
 }
 
 // Map of "<service-name>" -> secret, populated from env at call time so that
-// secrets added after startup are picked up without a restart.
+// secrets added after startup are picked up without a restart. Only returns
+// per-service secrets (not the shared one).
 function getServiceSecrets() {
   const map = {};
   for (const [k, v] of Object.entries(process.env)) {
+    if (k === SHARED_SECRET_ENV) continue; // not per-service
     if (k.startsWith(SECRET_PREFIX) && typeof v === 'string' && v.length > 0) {
       const svc = k.slice(SECRET_PREFIX.length).toLowerCase().replace(/_/g, '-');
       map[svc] = v;
     }
   }
   return map;
+}
+
+// Parses DEPLOY_WEBHOOK_SERVICES into either the string "*" (wildcard —
+// any validServiceName is allowed) or a Set of explicit compose service
+// names. Returns null if no allowlist is configured.
+function getSharedAllowlist() {
+  const raw = (process.env[SHARED_ALLOWLIST_ENV] || '').trim();
+  if (!raw) return null;
+  if (raw === '*') return '*';
+  const entries = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  if (entries.length === 0) return null;
+  return new Set(entries);
+}
+
+// Decide whether a (service, provided-secret) pair is authorised to trigger
+// a deploy. Returns { ok: true, via } on success, or
+// { ok: false, status, reason } on failure.
+//
+// Checks, in order:
+//   1. service name is syntactically valid              (400 if not)
+//   2. service is configured via either mechanism       (404 if not)
+//   3. X-Hive-Secret was provided                       (401 if not)
+//   4. provided secret matches per-service or shared    (401 if not)
+function authorize(service, provided) {
+  if (!validServiceName(service)) {
+    return { ok: false, status: 400, reason: 'invalid_service_name' };
+  }
+
+  const perServiceKey = `${SECRET_PREFIX}${service.toUpperCase().replace(/-/g, '_')}`;
+  const perServiceSecret = process.env[perServiceKey];
+  const sharedSecret = process.env[SHARED_SECRET_ENV];
+  const allowlist = getSharedAllowlist();
+
+  const configuredViaPerService = Boolean(perServiceSecret);
+  const configuredViaShared =
+    Boolean(sharedSecret) &&
+    (allowlist === '*' || (allowlist && allowlist.has(service)));
+
+  if (!configuredViaPerService && !configuredViaShared) {
+    return { ok: false, status: 404, reason: 'not_configured' };
+  }
+
+  if (!provided) {
+    return { ok: false, status: 401, reason: 'missing_secret' };
+  }
+
+  if (configuredViaPerService && timingSafeEqual(provided, perServiceSecret)) {
+    return { ok: true, via: 'per-service' };
+  }
+  if (configuredViaShared && timingSafeEqual(provided, sharedSecret)) {
+    return { ok: true, via: 'shared' };
+  }
+  return { ok: false, status: 401, reason: 'bad_secret' };
 }
 
 function timingSafeEqual(a, b) {
@@ -199,8 +275,13 @@ function spawnDeploy(service) {
 module.exports = {
   validServiceName,
   getServiceSecrets,
+  getSharedAllowlist,
+  authorize,
   timingSafeEqual,
   appendAuditLog,
   spawnDeploy,
-  constants: { COMPOSE_FILE, PROJECT_DIR, LOG_DIR, SIDECAR_IMAGE, DOCKER_CONFIG, SECRET_PREFIX },
+  constants: {
+    COMPOSE_FILE, PROJECT_DIR, LOG_DIR, SIDECAR_IMAGE, DOCKER_CONFIG,
+    SECRET_PREFIX, SHARED_SECRET_ENV, SHARED_ALLOWLIST_ENV,
+  },
 };

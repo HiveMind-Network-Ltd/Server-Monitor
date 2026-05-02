@@ -455,61 +455,51 @@ app.get('/health', (req, res) => {
 
 // ============ Auto-Deploy Webhook ============
 // POST /deploy/:service
-//   Header: X-Hive-Secret: <per-service shared secret>
+//   Header: X-Hive-Secret: <shared or per-service secret>
 //
-// Each service that should be auto-deployable needs an env var named
-// DEPLOY_WEBHOOK_SECRET_<NAME> where <NAME> is the compose service name
-// uppercased with hyphens replaced by underscores, e.g.
+// Authentication & allowlisting (see services/deployService.js):
 //
-//   DEPLOY_WEBHOOK_SECRET_MARKETSCRAPER_API=...    (service "marketscraper-api")
-//   DEPLOY_WEBHOOK_SECRET_CLIENT_DESK=...          (service "clients" -> NB mapping must match compose)
+//   * Shared secret mode (recommended for a growing fleet):
+//     DEPLOY_WEBHOOK_SECRET=<value> plus DEPLOY_WEBHOOK_SERVICES=<list|*>
 //
-// On a valid request we spawn a detached sidecar container that runs:
+//   * Per-service secret mode (backward compat):
+//     DEPLOY_WEBHOOK_SECRET_<NAME>=<value>
+//
+// On a valid request we spawn a detached sidecar container that runs
 //   docker compose -f $COMPOSE_FILE pull  <svc>
 //   docker compose -f $COMPOSE_FILE up -d <svc>
-// and return 202 Accepted with the sidecar's container id. Progress and
-// final exit code are written to the audit log (see services/deployService).
-//
-// The sidecar pattern means this endpoint can redeploy server-monitor itself
-// without being killed mid-response.
+// and return 202 Accepted with the sidecar's container id. The sidecar
+// pattern lets server-monitor redeploy itself without being killed
+// mid-response.
 app.post('/deploy/:service', async (req, res) => {
   const service = req.params.service;
   const provided = req.headers['x-hive-secret'];
   const clientIp = req.ip || req.socket?.remoteAddress || 'unknown';
 
-  if (!deployService.validServiceName(service)) {
+  const auth = deployService.authorize(service, provided);
+  if (!auth.ok) {
     deployService.appendAuditLog({
-      event: 'reject', reason: 'invalid_service_name', service, ip: clientIp,
+      event: 'reject', reason: auth.reason, service, ip: clientIp,
     });
-    return res.status(400).json({ error: 'invalid service name' });
-  }
-
-  const expected = deployService.getServiceSecrets()[service];
-  if (!expected) {
-    deployService.appendAuditLog({
-      event: 'reject', reason: 'not_configured', service, ip: clientIp,
-    });
-    return res.status(404).json({
-      error: 'service not configured for auto-deploy',
-      hint: `set DEPLOY_WEBHOOK_SECRET_${service.toUpperCase().replace(/-/g, '_')} in the server-monitor environment and restart`,
-    });
-  }
-
-  if (!provided || !deployService.timingSafeEqual(provided, expected)) {
-    deployService.appendAuditLog({
-      event: 'reject', reason: 'bad_secret', service, ip: clientIp,
-    });
-    return res.status(401).json({ error: 'invalid secret' });
+    const body = { error: auth.reason };
+    if (auth.reason === 'not_configured') {
+      body.hint =
+        'allowlist this service via DEPLOY_WEBHOOK_SERVICES (shared-secret mode) ' +
+        `or DEPLOY_WEBHOOK_SECRET_${service.toUpperCase().replace(/-/g, '_')} ` +
+        '(per-service mode) in the server-monitor environment, then restart';
+    }
+    return res.status(auth.status).json(body);
   }
 
   try {
     const { sidecarId, logFile } = await deployService.spawnDeploy(service);
     deployService.appendAuditLog({
-      event: 'accept', service, sidecar: sidecarId, logFile, ip: clientIp,
+      event: 'accept', service, via: auth.via, sidecar: sidecarId, logFile, ip: clientIp,
     });
     return res.status(202).json({
       ok: true,
       service,
+      via: auth.via,
       sidecar: sidecarId,
       logFile,
       message: 'deploy accepted; monitor logFile for progress',
