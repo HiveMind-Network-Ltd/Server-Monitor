@@ -47,6 +47,17 @@ jobs:
 
       - name: Trigger deploy on grid server
         run: |
-          curl -s -o /dev/null -w "%{http_code}" \
+          set -eo pipefail
+          # Expects the new POST /deploy/:service webhook (see services/deployService.js)
+          # to respond 202 with a JSON body; fail the CI step on any non-2xx.
+          echo "Calling deploy webhook..."
+          resp=$(curl -sS -w "\nHTTP_STATUS=%{http_code}" \
             -X POST https://server-monitor.grid.hivemindnetwork.com/deploy/server-monitor \
-            -H "X-Hive-Secret: ${{ secrets.DEPLOY_WEBHOOK_SECRET_SERVER_MONITOR }}"
+            -H "X-Hive-Secret: ${{ secrets.DEPLOY_WEBHOOK_SECRET_SERVER_MONITOR }}")
+          echo "$resp"
+          status=$(echo "$resp" | sed -n 's/^HTTP_STATUS=//p')
+          if [ "${status:-0}" -lt 200 ] || [ "${status:-0}" -ge 300 ]; then
+            echo "::error::deploy webhook returned HTTP $status"
+            exit 1
+          fi
+          echo "Deploy webhook accepted (status=$status); sidecar is redeploying server-monitor."

@@ -1,5 +1,6 @@
 # Use official Node.js LTS image
-FROM node:18-alpine
+# (bumped from node:18-alpine on 2026-05-02 — AWS SDK v3 drops Node 18 support)
+FROM node:20-alpine
 
 # Install Docker CLI (for container monitoring)
 RUN apk add --no-cache docker-cli

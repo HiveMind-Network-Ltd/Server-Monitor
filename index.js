@@ -10,6 +10,7 @@ const { startBackgroundMonitoring, getLatestMetrics } = require('./services/back
 const { isEmailConfigured, sendTestEmail } = require('./services/emailService');
 const metricsStore = require('./services/metricsStore');
 const { getRecommendations } = require('./services/advisorEngine');
+const deployService = require('./services/deployService');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -450,6 +451,76 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     uptime: process.uptime()
   });
+});
+
+// ============ Auto-Deploy Webhook ============
+// POST /deploy/:service
+//   Header: X-Hive-Secret: <per-service shared secret>
+//
+// Each service that should be auto-deployable needs an env var named
+// DEPLOY_WEBHOOK_SECRET_<NAME> where <NAME> is the compose service name
+// uppercased with hyphens replaced by underscores, e.g.
+//
+//   DEPLOY_WEBHOOK_SECRET_MARKETSCRAPER_API=...    (service "marketscraper-api")
+//   DEPLOY_WEBHOOK_SECRET_CLIENT_DESK=...          (service "clients" -> NB mapping must match compose)
+//
+// On a valid request we spawn a detached sidecar container that runs:
+//   docker compose -f $COMPOSE_FILE pull  <svc>
+//   docker compose -f $COMPOSE_FILE up -d <svc>
+// and return 202 Accepted with the sidecar's container id. Progress and
+// final exit code are written to the audit log (see services/deployService).
+//
+// The sidecar pattern means this endpoint can redeploy server-monitor itself
+// without being killed mid-response.
+app.post('/deploy/:service', async (req, res) => {
+  const service = req.params.service;
+  const provided = req.headers['x-hive-secret'];
+  const clientIp = req.ip || req.socket?.remoteAddress || 'unknown';
+
+  if (!deployService.validServiceName(service)) {
+    deployService.appendAuditLog({
+      event: 'reject', reason: 'invalid_service_name', service, ip: clientIp,
+    });
+    return res.status(400).json({ error: 'invalid service name' });
+  }
+
+  const expected = deployService.getServiceSecrets()[service];
+  if (!expected) {
+    deployService.appendAuditLog({
+      event: 'reject', reason: 'not_configured', service, ip: clientIp,
+    });
+    return res.status(404).json({
+      error: 'service not configured for auto-deploy',
+      hint: `set DEPLOY_WEBHOOK_SECRET_${service.toUpperCase().replace(/-/g, '_')} in the server-monitor environment and restart`,
+    });
+  }
+
+  if (!provided || !deployService.timingSafeEqual(provided, expected)) {
+    deployService.appendAuditLog({
+      event: 'reject', reason: 'bad_secret', service, ip: clientIp,
+    });
+    return res.status(401).json({ error: 'invalid secret' });
+  }
+
+  try {
+    const { sidecarId, logFile } = await deployService.spawnDeploy(service);
+    deployService.appendAuditLog({
+      event: 'accept', service, sidecar: sidecarId, logFile, ip: clientIp,
+    });
+    return res.status(202).json({
+      ok: true,
+      service,
+      sidecar: sidecarId,
+      logFile,
+      message: 'deploy accepted; monitor logFile for progress',
+    });
+  } catch (err) {
+    console.error(`[deploy] ${service}: ${err.message}`);
+    deployService.appendAuditLog({
+      event: 'error', service, message: err.message, ip: clientIp,
+    });
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // Serve frontend
